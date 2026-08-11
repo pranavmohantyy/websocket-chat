@@ -1,6 +1,7 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from collections import defaultdict
+import time
 
 app = FastAPI()
 
@@ -10,6 +11,7 @@ class ConnectionManager:
     def __init__(self):
         self.active_connections = defaultdict(list)
         self.message_history = defaultdict(list)
+        self.message_timestamps = defaultdict(lambda: defaultdict(float))
 
     async def connect(self, room_id: str, websocket: WebSocket):
         await websocket.accept()
@@ -17,18 +19,23 @@ class ConnectionManager:
         self.broadcast(room_id, f"{websocket.client} joined")
         await self.send_history(room_id, websocket)
 
-    async def disconnect(self, room_id: str, websocket: WebSocket):
-        self.active_connections[room_id].remove(websocket)
-        self.broadcast(room_id, f"{websocket.client} left")
+    async def send_history(self, room_id: str, websocket: WebSocket):
+        for message in self.message_history[room_id]:
+            await websocket.send_text(message)
 
     def broadcast(self, room_id: str, message: str):
         for connection in self.active_connections[room_id]:
-            asyncio.create_task(connection.send_text(message))
+            connection.send_text(message)
 
-    async def send_history(self, room_id: str, websocket: WebSocket):
-        if room_id in self.message_history:
-            for message in self.message_history[room_id]:
-                await websocket.send_text(message)
+    async def send_message(self, room_id: str, message: str, user: str):
+        current_time = time.time()
+        last_sent = self.message_timestamps[room_id][user]
+        if current_time - last_sent < 1:
+            return False
+        self.message_timestamps[room_id][user] = current_time
+        self.message_history[room_id].append(message)
+        self.broadcast(room_id, message)
+        return True
 
 manager = ConnectionManager()
 
@@ -38,23 +45,12 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
     try:
         while True:
             data = await websocket.receive_text()
-            if data.startswith("/dm "):
-                parts = data.split(' ', 2)
-                if len(parts) == 3:
-                    username = parts[1]
-                    message = parts[2]
-                    await manager.send_private_message(room_id, username, message)
-                continue
-            manager.message_history[room_id].append(data)
-            manager.broadcast(room_id, data)
+            if not await manager.send_message(room_id, data, str(websocket.client)):
+                await websocket.send_text("You are sending messages too quickly. Please wait a second.")
     except WebSocketDisconnect:
-        manager.disconnect(room_id, websocket)
-
-async def send_private_message(room_id: str, username: str, message: str):
-    for connection in manager.active_connections[room_id]:
-        if connection.client.host == username:
-            await connection.send_text(f"[DM] {message}")
+        manager.active_connections[room_id].remove(websocket)
+        manager.broadcast(room_id, f"{websocket.client} left")
 
 @app.get("/")
 def get():
-    return HTMLResponse(content="<html><body><h1>WebSocket Chat</h1></body></html>")
+    return HTMLResponse("<html><body><h1>WebSocket Chat</h1></body></html>")
