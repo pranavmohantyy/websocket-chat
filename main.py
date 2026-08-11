@@ -21,14 +21,14 @@ class ConnectionManager:
         self.active_connections[room_id].remove(websocket)
         self.broadcast(room_id, f"{websocket.client} left")
 
-    async def send_history(self, room_id: str, websocket: WebSocket):
-        history = self.message_history[room_id]
-        for msg in history:
-            await websocket.send_text(msg)
-
-    async def broadcast(self, room_id: str, message: str):
+    def broadcast(self, room_id: str, message: str):
         for connection in self.active_connections[room_id]:
-            await connection.send_text(message)
+            asyncio.create_task(connection.send_text(message))
+
+    async def send_history(self, room_id: str, websocket: WebSocket):
+        if room_id in self.message_history:
+            for message in self.message_history[room_id]:
+                await websocket.send_text(message)
 
 manager = ConnectionManager()
 
@@ -37,17 +37,24 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
     await manager.connect(room_id, websocket)
     try:
         while True:
-            data = await websocket.receive_json()
-            if "type" in data and data["type"] == "typing":
-                manager.broadcast(room_id, f"{websocket.client} is typing...")
-            else:
-                message = data.get("message")
-                if message:
-                    manager.message_history[room_id].append(message)
-                    manager.broadcast(room_id, message)
+            data = await websocket.receive_text()
+            if data.startswith("/dm "):
+                parts = data.split(' ', 2)
+                if len(parts) == 3:
+                    username = parts[1]
+                    message = parts[2]
+                    await manager.send_private_message(room_id, username, message)
+                continue
+            manager.message_history[room_id].append(data)
+            manager.broadcast(room_id, data)
     except WebSocketDisconnect:
-        await manager.disconnect(room_id, websocket)
+        manager.disconnect(room_id, websocket)
+
+async def send_private_message(room_id: str, username: str, message: str):
+    for connection in manager.active_connections[room_id]:
+        if connection.client.host == username:
+            await connection.send_text(f"[DM] {message}")
 
 @app.get("/")
 def get():
-    return HTMLResponse('<html><body><h1>WebSocket Chat</h1></body></html>')
+    return HTMLResponse(content="<html><body><h1>WebSocket Chat</h1></body></html>")
