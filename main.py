@@ -1,1 +1,62 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException\nfrom fastapi.responses import HTMLResponse\nfrom collections import defaultdict\nimport time\n\napp = FastAPI()\n\nrooms = defaultdict(list)\n\nclass ConnectionManager:\n    def __init__(self):\n        self.active_connections = defaultdict(list)\n        self.message_history = defaultdict(list)\n        self.message_timestamps = defaultdict(lambda: defaultdict(float))\n\n    async def connect(self, room_id: str, websocket: WebSocket):\n        await websocket.accept()\n        self.active_connections[room_id].append(websocket)\n        self.broadcast\n\n    async def disconnect(self, room_id: str, websocket: WebSocket):\n        self.active_connections[room_id].remove(websocket)\n\n    async def broadcast(self, room_id: str, message: str):\n        for connection in self.active_connections[room_id]:\n            await connection.send_text(message)\n\n    def get_active_rooms(self):\n        return {room: len(connections) for room, connections in self.active_connections.items()}\n\nmanager = ConnectionManager()\n\n@app.get("/rooms")\nasync def list_rooms():\n    return manager.get_active_rooms()\n\n@app.websocket("/ws/{room_id}")\nasync def websocket_endpoint(room_id: str, websocket: WebSocket):\n    await manager.connect(room_id, websocket)\n    try: \n        while True:\n            data = await websocket.receive_text()\n            await manager.broadcast(room_id, data)\n    except WebSocketDisconnect:\n        manager.disconnect(room_id, websocket)\n        await manager.broadcast(room_id, f"User left the room: {room_id}")\n\n@app.get("/")\ndef get():\n    return HTMLResponse(content="<h1>Welcome to the Chat</h1>", status_code=200)\n
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.responses import HTMLResponse
+from collections import defaultdict
+from sqlalchemy import create_engine, Column, String, Integer, DateTime
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+import time
+
+app = FastAPI()
+
+Base = declarative_base()
+
+class Message(Base):
+    __tablename__ = 'messages'
+    id = Column(Integer, primary_key=True, index=True)
+    room = Column(String, index=True)
+    user = Column(String)
+    content = Column(String)
+    timestamp = Column(DateTime)
+
+DATABASE_URL = "sqlite:///./messages.db"
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base.metadata.create_all(bind=engine)
+
+rooms = defaultdict(list)
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections = defaultdict(list)
+
+    async def connect(self, room_id: str, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections[room_id].append(websocket)
+
+    def disconnect(self, room_id: str, websocket: WebSocket):
+        self.active_connections[room_id].remove(websocket)
+
+    async def send_message(self, room_id: str, message: str):
+        for connection in self.active_connections[room_id]:
+            await connection.send_text(message)
+
+manager = ConnectionManager()
+
+@app.websocket("/ws/{room_id}")
+async def websocket_endpoint(websocket: WebSocket, room_id: str):
+    await manager.connect(room_id, websocket)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            timestamp = time.time()
+            message = Message(room=room_id, user="user", content=data, timestamp=timestamp)
+            with SessionLocal() as db:
+                db.add(message)
+                db.commit()
+            await manager.send_message(room_id, data)
+    except WebSocketDisconnect:
+        manager.disconnect(room_id, websocket)
+
+@app.get("/")
+def get():
+    return HTMLResponse(content="<html><body><h1>WebSocket Chat</h1></body></html>")
