@@ -1,1 +1,58 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException\nfrom fastapi.responses import HTMLResponse\nfrom collections import defaultdict\nfrom sqlalchemy import create_engine, Column, String, Integer, DateTime\nfrom sqlalchemy.ext.declarative import declarative_base\nfrom sqlalchemy.orm import sessionmaker\nimport time\n\napp = FastAPI()\n\nBase = declarative_base()\n\nclass Message(Base):\n    __tablename__ = 'messages'\n    id = Column(Integer, primary_key=True, index=True)\n    room = Column(String, index=True)\n    user = Column(String)\n    content = Column(String)\n\nclass WebSocketRoom:\n    def __init__(self):\n        self.active_connections = []\n        self.messages = []\n\nrooms = defaultdict(WebSocketRoom)\n\n@app.websocket("/ws/{room_name}")\nasync def websocket_endpoint(websocket: WebSocket, room_name: str):\n    await websocket.accept()\n    rooms[room_name].active_connections.append(websocket)\n    try:\n        while True:\n            data = await websocket.receive_text()\n            message = data.split("|", 1)\n            user, content = message[0], message[1]\n            msg = {\n                'user': user,\n                'content': content,\n            }\n            rooms[room_name].messages.append(msg)\n            for connection in rooms[room_name].active_connections:\n                await connection.send_text(f"{user}: {content}")\n    except WebSocketDisconnect:\n        rooms[room_name].active_connections.remove(websocket)\n\n@app.get("/")\nasync def get():\n    return HTMLResponse(content=html_content())\n\ndef html_content():\n    return '''<!DOCTYPE html>\n<html lang="en">\n<head>\n    <meta charset="UTF-8">\n    <meta name="viewport" content="width=device-width, initial-scale=1.0">\n    <title>WebSocket Chat</title>\n    <style>\n        body { font-family: Arial, sans-serif; }\n        .chat { max-width: 600px; margin: 0 auto; }\n        .message { padding: 10px; margin: 5px; border-radius: 5px; }\n        .user1 { background-color: #e1f5fe; }\n        .user2 { background-color: #ffe0b2; }\n        #messages { height: 400px; overflow-y: scroll; }\n    </style>\n</head>\n<body>\n    <div class='chat'>\n        <div id='messages'></div>\n        <input type='text' id='messageInput' placeholder='Type a message...'>\n    </div>\n    <script>\n        const ws = new WebSocket('ws://' + window.location.host + '/ws/myroom');\n        const messages = document.getElementById('messages');\n        const messageInput = document.getElementById('messageInput');\n\n        ws.onmessage = function(event) {\n            const msg = document.createElement('div');\n            const parts = event.data.split(': ');\n            msg.className = 'message ' + (parts[0] === 'user1' ? 'user1' : 'user2');\n            msg.textContent = event.data;\n            messages.appendChild(msg);\n            messages.scrollTop = messages.scrollHeight;\n        };\n\n        messageInput.addEventListener('keypress', function(e) {\n            if (e.key === 'Enter') {\n                ws.send('user1|' + messageInput.value);\n                messageInput.value = '';\n            }\n        });\n    </script>\n</body>\n</html>'''
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.responses import HTMLResponse
+from collections import defaultdict
+from sqlalchemy import create_engine, Column, String, Integer, DateTime
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+import time
+
+app = FastAPI()
+
+Base = declarative_base()
+
+class Message(Base):
+    __tablename__ = 'messages'
+    id = Column(Integer, primary_key=True, index=True)
+    room = Column(String, index=True)
+    user = Column(String)
+    content = Column(String)
+
+clients = defaultdict(list)
+rooms = defaultdict(list)
+
+@app.websocket("/ws/{room_name}")
+def websocket_endpoint(websocket: WebSocket, room_name: str):
+    await websocket.accept()
+    clients[room_name].append(websocket)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            if data.startswith("/kick "):
+                user_to_kick = data.split()[1]
+                await kick_user(room_name, user_to_kick)
+            elif data.startswith("/clear"):
+                await clear_history(room_name)
+            elif data.startswith("/rename "):
+                new_room_name = data.split()[1]
+                await rename_room(room_name, new_room_name)
+            else:
+                await broadcast(room_name, f"{data}")
+    except WebSocketDisconnect:
+        clients[room_name].remove(websocket)
+
+async def kick_user(room_name, user):
+    clients[room_name] = [ws for ws in clients[room_name] if ws != user]
+
+async def clear_history(room_name):
+    pass  # Implement clearing history logic
+
+async def rename_room(old_name, new_name):
+    clients[new_name] = clients.pop(old_name)
+
+async def broadcast(room_name, message):
+    for client in clients[room_name]:
+        await client.send_text(message)
+
+@app.get("/")
+def get():
+    return HTMLResponse(content="<html><body><h1>WebSocket Chat</h1></body></html>")
